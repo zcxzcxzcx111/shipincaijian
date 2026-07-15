@@ -89,19 +89,28 @@ def export_native_video(
             cwd=str(cwd),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
-            universal_newlines=True,
-            bufsize=1,
         )
         if proc.stderr:
-            frame_pattern = re.compile(r"frame=\s*(\d+)")
-            for line in proc.stderr:
-                m = frame_pattern.search(line)
-                if m and progress_callback:
-                    try:
-                        done = int(m.group(1))
-                        progress_callback(done, max(1, total_frames))
-                    except Exception:
-                        pass
+            frame_pattern = re.compile(rb"frame=\s*(\d+)")
+            buffer = b""
+            while True:
+                chunk = proc.stderr.read(256)
+                if not chunk:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                buffer += chunk
+                parts = re.split(rb"[\r\n]+", buffer)
+                if len(parts) > 1:
+                    for part in parts[:-1]:
+                        m = frame_pattern.search(part)
+                        if m and progress_callback:
+                            try:
+                                done = int(m.group(1).decode("ascii"))
+                                progress_callback(done, max(1, total_frames))
+                            except Exception:
+                                pass
+                    buffer = parts[-1]
         proc.wait()
         return proc.returncode == 0
     except Exception:
@@ -168,7 +177,7 @@ def export_exact_video(
     writer = None
     try:
         if ffmpeg_exe:
-            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if not proc or proc.poll() is not None:
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             writer = cv2.VideoWriter(str(output), fourcc, fps, (out_w, out_h))
