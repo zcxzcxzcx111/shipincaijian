@@ -205,12 +205,19 @@ def export_exact_video(
             w = int(round(crop.width))
             h = int(round(crop.height))
 
-            x1 = max(0, min(x1, actual_w - 1))
-            y1 = max(0, min(y1, actual_h - 1))
-            w = max(2, min(w, actual_w - x1))
-            h = max(2, min(h, actual_h - y1))
+            pad_left = max(0, -x1)
+            pad_top = max(0, -y1)
+            pad_right = max(0, (x1 + w) - actual_w)
+            pad_bottom = max(0, (y1 + h) - actual_h)
 
-            cropped = img[y1 : y1 + h, x1 : x1 + w]
+            if pad_left > 0 or pad_top > 0 or pad_right > 0 or pad_bottom > 0:
+                padded_img = cv2.copyMakeBorder(img, pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_CONSTANT, value=(0, 0, 0))
+                src_x = x1 + pad_left
+                src_y = y1 + pad_top
+                cropped = padded_img[src_y : src_y + h, src_x : src_x + w]
+            else:
+                cropped = img[y1 : y1 + h, x1 : x1 + w]
+
             resized = cv2.resize(cropped, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
 
             if proc and proc.stdin:

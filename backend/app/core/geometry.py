@@ -116,7 +116,7 @@ def center_crop_on_subject(
     aspect_width: int = 9,
     aspect_height: int = 16,
 ) -> Box:
-    width, height = fit_aspect_size(width, height, frame_width, frame_height, aspect_width, aspect_height)
+    width, height = fit_aspect_size(width, height, 999999, 999999, aspect_width, aspect_height)
     if allow_outside:
         return Box(
             x=subject.cx - width / 2,
@@ -169,41 +169,54 @@ def build_crop_path(
     if not track:
         return []
 
-    raw_crops = [
-        fit_aspect_around_box(
-            frame.subject_box if frame.confidence >= 0.98 else expand_subject_box(frame.subject_box, frame_width, frame_height, margin),
-            frame_width,
-            frame_height,
-            aspect_width,
-            aspect_height,
-        )
-        for frame in track
-    ]
+    # 1. 计算初始框住时的人物相对画幅比例 (`开始时框住的比例`)
+    first_subject = track[0].subject_box
+    first_expanded = expand_subject_box(first_subject, frame_width, frame_height, margin)
+    init_w, init_h = fit_aspect_size(first_expanded.width, first_expanded.height, 999999, 999999, aspect_width, aspect_height)
+    
+    scale_ratio_h = init_h / max(1.0, first_subject.height)
+    target_ratio = aspect_width / aspect_height
+
+    # 2. 逐帧生成保持初版比例且完全以人物为中心的目标框
+    raw_ws: list[float] = []
+    raw_hs: list[float] = []
+    for frame in track:
+        # 严格按开始时的人物高宽比例计算当前帧目标框大小
+        target_h = max(32.0, frame.subject_box.height * scale_ratio_h)
+        target_w = target_h * target_ratio
+        # 保障包覆全身及边界安全边距
+        if target_w < frame.subject_box.width * 1.15:
+            target_w = frame.subject_box.width * 1.15
+            target_h = target_w / target_ratio
+        if target_h < frame.subject_box.height * 1.15:
+            target_h = frame.subject_box.height * 1.15
+            target_w = target_h * target_ratio
+        raw_ws.append(target_w)
+        raw_hs.append(target_h)
+
     if smooth_radius > 0:
-        ws = damping_smooth(median_smooth([box.width for box in raw_crops], smooth_radius))
-        hs = damping_smooth(median_smooth([box.height for box in raw_crops], smooth_radius))
+        ws = damping_smooth(median_smooth(raw_ws, smooth_radius))
+        hs = damping_smooth(median_smooth(raw_hs, smooth_radius))
         cxs = damping_smooth(median_smooth([frame.subject_box.cx for frame in track], smooth_radius))
         cys = damping_smooth(median_smooth([frame.subject_box.cy for frame in track], smooth_radius))
     else:
-        ws = [box.width for box in raw_crops]
-        hs = [box.height for box in raw_crops]
+        ws = raw_ws
+        hs = raw_hs
         cxs = [frame.subject_box.cx for frame in track]
         cys = [frame.subject_box.cy for frame in track]
 
     crop_frames: list[CropFrame] = []
     previous: TrackFrame | None = None
     for index, frame in enumerate(track):
-        width = max(ws[index], raw_crops[index].width)
-        height = max(hs[index], raw_crops[index].height)
-        crop_initial = Box(x=cxs[index] - width / 2, y=cys[index] - height / 2, width=width, height=height)
-        if frame.confidence >= 0.94:
-            w_use = frame.subject_box.width
-            h_use = frame.subject_box.height
-            crop = center_crop_on_subject(frame.subject_box, w_use, h_use, frame_width, frame_height, allow_outside=False, aspect_width=aspect_width, aspect_height=aspect_height)
-        elif frame.confidence >= 0.92:
-            crop = center_crop_on_subject(frame.subject_box, width, height, frame_width, frame_height, allow_outside=False, aspect_width=aspect_width, aspect_height=aspect_height)
-        else:
-            crop = ensure_subject_visible(crop_initial, frame.subject_box, frame_width, frame_height, aspect_width, aspect_height)
+        width = ws[index]
+        height = hs[index]
+        # 严格居中：画幅的正中央就是目标人物的中心 (`始终保持这个中心在画幅的正中央`)
+        crop = Box(
+            x=cxs[index] - width / 2,
+            y=cys[index] - height / 2,
+            width=width,
+            height=height,
+        )
         jump = 0.0 if previous is None else abs(frame.subject_box.cx - previous.subject_box.cx) + abs(frame.subject_box.cy - previous.subject_box.cy)
         suspicious = frame.confidence < confidence_floor or jump > max(frame_width, frame_height) * 0.18
         crop_frames.append(
@@ -231,40 +244,19 @@ def ensure_subject_visible(
     height = crop.height
     target_ratio = aspect_width / aspect_height
 
-    # Enforce safety margins around the subject body (head to toe safety check)
-    if height < subject.height * 1.12:
-        height = subject.height * 1.12
+    if height < subject.height * 1.15:
+        height = subject.height * 1.15
         width = height * target_ratio
-    if width < subject.width * 1.12:
-        width = subject.width * 1.12
+    if width < subject.width * 1.15:
+        width = subject.width * 1.15
         height = width / target_ratio
 
-    width, height = fit_aspect_size(width, height, frame_width, frame_height, aspect_width, aspect_height)
+    width, height = fit_aspect_size(width, height, 999999, 999999, aspect_width, aspect_height)
 
     # Actively anchor crop center exactly on subject center (`100% 以目标人物中心对齐`)
-    desired_cx = subject.cx
-    desired_cy = subject.cy
-
-    x = desired_cx - width / 2
-    y = desired_cy - height / 2
-
-    # Enforce complete body visibility check
-    if x > subject.x - 10:
-        x = subject.x - 10
-    if x + width < subject.right + 10:
-        x = subject.right + 10 - width
-    if y > subject.y - 10:
-        y = subject.y - 10
-    if y + height < subject.bottom + 10:
-        y = subject.bottom + 10 - height
-
-    # Strict boundary clamp (`保证不出框`)
-    x = clamp(x, 0, max(0, frame_width - width))
-    y = clamp(y, 0, max(0, frame_height - height))
-
     return Box(
-        x=x,
-        y=y,
+        x=subject.cx - width / 2,
+        y=subject.cy - height / 2,
         width=width,
         height=height,
     )
