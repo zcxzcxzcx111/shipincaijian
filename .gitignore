@@ -1,0 +1,14 @@
+.superpowers/
+.venv/
+node_modules/
+dist/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+backend/data/
+*.mp4
+*.mov
+*.avi
+*.mkv
+
